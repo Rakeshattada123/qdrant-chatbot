@@ -16,7 +16,7 @@ from llama_index.llms.gemini import Gemini
 from llama_index.embeddings.gemini import GeminiEmbedding
 
 # --- Async Qdrant Client ---
-from qdrant_client import AsyncQdrantClient
+from qdrant_client import AsyncQdrantClient, models # <<< NEW: Import 'models'
 
 # Load Environment Variables
 load_dotenv()
@@ -34,6 +34,8 @@ async def lifespan(app: FastAPI):
             model_name="models/gemini-1.5-flash",
             api_key=os.getenv("GOOGLE_API_KEY")
         )
+        # Your embedding model name 'models/embedding-001' is correct.
+        # This model has a vector size of 768.
         Settings.embed_model = GeminiEmbedding(
             model_name="models/embedding-001",
             api_key=os.getenv("GOOGLE_API_KEY")
@@ -49,6 +51,24 @@ async def lifespan(app: FastAPI):
             raise RuntimeError("Missing QDRANT_HOST or QDRANT_API_KEY in environment.")
 
         qdrant_client = AsyncQdrantClient(url=qdrant_host, api_key=qdrant_api_key)
+
+        # <<< NEW CODE BLOCK START >>>
+        # 2.5. Verify collection exists, create if not
+        print("2.5. Verifying Qdrant collection...")
+        try:
+            await qdrant_client.get_collection(collection_name=collection_name)
+            print(f"Collection '{collection_name}' already exists.")
+        except Exception:
+            print(f"Collection '{collection_name}' not found. Creating it now...")
+            await qdrant_client.recreate_collection(
+                collection_name=collection_name,
+                vectors_config=models.VectorParams(
+                    size=768,  # Gemini 'embedding-001' uses 768 dimensions
+                    distance=models.Distance.COSINE,
+                ),
+            )
+            print(f"Collection '{collection_name}' created successfully.")
+        # <<< NEW CODE BLOCK END >>>
 
         # 3. Load vector store and index
         print("3. Loading vector store and index...")
@@ -69,6 +89,7 @@ async def lifespan(app: FastAPI):
 
     except Exception as e:
         print(f"❌ An error occurred during startup: {e}")
+        # This will stop the server from starting if something goes wrong
         raise RuntimeError(f"Server startup failed: {e}")
 
     yield
@@ -85,6 +106,7 @@ app = FastAPI(
 origins = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
+    # Add your deployed frontend URL here when you have it
 ]
 app.add_middleware(
     CORSMiddleware,
@@ -105,14 +127,14 @@ class ChatResponse(BaseModel):
 @app.post("/chat", response_model=ChatResponse)
 async def chat_with_bot(request: Request, query_request: QueryRequest):
     if "chat_engine" not in app_state:
-        raise HTTPException(status_code=503, detail="Chat engine is not available.")
+        raise HTTPException(status_code=503, detail="Chat engine is not available due to a startup error.")
     if not query_request.query:
         raise HTTPException(status_code=400, detail="Query cannot be empty.")
     try:
         chat_engine = app_state["chat_engine"]
         response = await chat_engine.achat(query_request.query)
         if not response or not response.response:
-            raise HTTPException(status_code=500, detail="Failed to get a valid response.")
+            raise HTTPException(status_code=500, detail="Failed to get a valid response from the chat engine.")
         return ChatResponse(answer=response.response)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"An internal error occurred: {e}")
